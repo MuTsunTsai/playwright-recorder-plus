@@ -3,7 +3,7 @@
 // High-quality video recording for Playwright. Wraps page.screencast (1.59+)
 // with a configurable ffmpeg encoder, replacing Playwright's built-in
 // recordVideo whose ffmpeg arguments are hardcoded to a low-bitrate VP8
-// realtime preset (microsoft/playwright#4255 et al).
+// realtime preset (microsoft/playwright#8683, #12056, #17217, #31424).
 
 import ffmpegStatic from "ffmpeg-static";
 

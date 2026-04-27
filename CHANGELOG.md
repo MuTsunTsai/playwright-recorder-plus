@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-27
+
+### Fixed
+
+- README and source comments cited the wrong upstream Playwright issues for the "ffmpeg config is hardcoded" pain. Replaced with the actually-relevant threads: [#8683](https://github.com/microsoft/playwright/issues/8683), [#12056](https://github.com/microsoft/playwright/issues/12056), [#17217](https://github.com/microsoft/playwright/issues/17217), [#31424](https://github.com/microsoft/playwright/issues/31424).
+
 ## [0.1.0] - 2026-04-27
 
 Initial public release.

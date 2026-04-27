@@ -10,7 +10,7 @@ A higher-quality, configurable alternative to Playwright's built-in `recordVideo
 
 Playwright's `recordVideo` produces visibly compressed VP8 webm with mosquito noise around glyph edges. The ffmpeg arguments are hardcoded to a low-bitrate realtime preset -- fine for CI test artifacts, painful for tutorial recordings, demo videos, and bug reproductions.
 
-The maintainers have repeatedly declined to expose tuning options ([#4255](https://github.com/microsoft/playwright/issues/4255), [#8683](https://github.com/microsoft/playwright/issues/8683), [#22516](https://github.com/microsoft/playwright/issues/22516)) on the grounds that ffmpeg is an internal implementation detail. This package wraps Playwright 1.59+'s public `page.screencast` API, pipes the raw JPEG frames into a separately-shipped ffmpeg, and gives you back full control over the encoder.
+The maintainers have repeatedly declined to expose tuning options ([#8683](https://github.com/microsoft/playwright/issues/8683), [#12056](https://github.com/microsoft/playwright/issues/12056), [#17217](https://github.com/microsoft/playwright/issues/17217), [#31424](https://github.com/microsoft/playwright/issues/31424)) on the grounds that ffmpeg is an internal implementation detail. This package wraps Playwright 1.59+'s public `page.screencast` API, pipes the raw JPEG frames into a separately-shipped ffmpeg, and gives you back full control over the encoder.
 
 What you get on top of `recordVideo`:
 
