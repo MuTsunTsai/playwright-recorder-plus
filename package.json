@@ -1,6 +1,6 @@
 {
 	"name": "playwright-recorder-plus",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "A higher-quality, configurable alternative to Playwright's built-in recordVideo. Fixed two-pass pipeline (fast realtime capture + configurable transcode) with pause/resume, crop, multi-page contexts, and inline audio scheduling.",
 	"keywords": [
 		"playwright",
