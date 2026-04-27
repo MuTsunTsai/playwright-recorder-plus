@@ -1,0 +1,4 @@
+allowBuilds:
+  ffmpeg-static: true
+  core-js: true
+  unrs-resolver: true

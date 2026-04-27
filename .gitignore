@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.rslib/
+NOTE.md
+CLAUDE.md
+.claude/
+test/out/
+test-results/
+playwright-report/

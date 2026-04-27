@@ -1,0 +1,25 @@
+{
+	"compilerOptions": {
+		"lib": [
+			"ESNext"
+		],
+		"types": [
+			"node"
+		],
+		"target": "ESNext",
+		"module": "ESNext",
+		"noEmit": true,
+		"strict": true,
+		"skipLibCheck": true,
+		"isolatedModules": true,
+		"resolveJsonModule": true,
+		"moduleResolution": "bundler",
+		"useDefineForClassFields": true,
+		"allowImportingTsExtensions": true
+	},
+	"include": [
+		"./*.ts",
+		"./src/**/*.ts",
+		"./test/**/*.ts"
+	]
+}
