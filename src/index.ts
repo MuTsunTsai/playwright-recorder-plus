@@ -14,7 +14,7 @@ import {
 	defaultPresetForPath,
 	DEFAULT_FPS,
 	DEFAULT_JPEG_QUALITY,
-	DEFAULT_VIEWPORT,
+	DEFAULT_VIEWPORT
 } from "./defaults";
 import { RecorderImpl } from "./recorder";
 
@@ -79,16 +79,15 @@ export async function attachRecorder(page: Page, opts: RecorderOptions): Promise
 		buildSecondPassArgs(opts.preset ?? defaultPresetForPath(opts.path));
 	const intermediatePath = opts.intermediatePath ?? defaultIntermediatePath(opts.path);
 
-	const recorder = new RecorderImpl(
-		page,
-		{ ...opts, jpegQuality: opts.jpegQuality ?? DEFAULT_JPEG_QUALITY },
+	const recorder = new RecorderImpl(page, {
+		opts: { ...opts, jpegQuality: opts.jpegQuality ?? DEFAULT_JPEG_QUALITY },
 		ffmpegPath,
 		firstPassArgs,
 		secondPassArgs,
 		intermediatePath,
 		fps,
-		size
-	);
+		size,
+	});
 	await recorder.attach(opts.autoStart ?? true);
 	return recorder;
 }

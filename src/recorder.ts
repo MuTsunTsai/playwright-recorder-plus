@@ -1,12 +1,27 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 
-import { pickAudioCodec } from "./defaults";
 import { parseJpegSize } from "./jpeg";
+import { buildSecondPassFfmpegArgs, runFfmpeg } from "./secondPass";
 
 import type { ChildProcess } from "node:child_process";
 import type { Page } from "playwright-core";
 import type { AudioTrack, Recorder, RecorderOptions, RecorderState, StopResult } from "./types";
+
+/**
+ * Resolved configuration for a single `RecorderImpl` instance. Defaults
+ * have already been applied by `attachRecorder` (in `index.ts`); the
+ * recorder treats every field as authoritative.
+ */
+export interface RecorderConfig {
+	opts: RecorderOptions;
+	ffmpegPath: string;
+	firstPassArgs: string[];
+	secondPassArgs: string[];
+	intermediatePath: string;
+	fps: number;
+	size: { width: number, height: number };
+}
 
 const MS_PER_SECOND = 1000;
 
@@ -42,13 +57,7 @@ export class RecorderImpl implements Recorder {
 
 	constructor(
 		private readonly page: Page,
-		private readonly opts: RecorderOptions,
-		private readonly ffmpegPath: string,
-		private readonly firstPassArgs: string[],
-		private readonly secondPassArgs: string[],
-		private readonly intermediatePath: string,
-		private readonly fps: number,
-		private readonly size: { width: number, height: number }
+		private readonly config: RecorderConfig
 	) {}
 
 	get state(): RecorderState { return this._state; }
@@ -73,23 +82,17 @@ export class RecorderImpl implements Recorder {
 	 */
 	async attach(autoStart: boolean): Promise<void> {
 		await this.page.screencast.start({
-			size: this.size,
-			quality: this.opts.jpegQuality,
+			size: this.config.size,
+			quality: this.config.opts.jpegQuality,
 			onFrame: ({ data }) => this.onFrame(data),
 		});
-		if(autoStart) {
-			this.ensureFfmpeg();
-			this._startWallMs = performance.now();
-			this._state = "recording";
-		}
+		if(autoStart) this.transitionToRecording();
 	}
 
 	start(): Promise<void> {
 		const warn = this.warn.bind(this);
 		if(this._state === "initial") {
-			this.ensureFfmpeg();
-			this._startWallMs = performance.now();
-			this._state = "recording";
+			this.transitionToRecording();
 		} else if(this._state === "recording") {
 			warn("start() called but already recording -- no-op");
 		} else if(this._state === "paused") {
@@ -121,9 +124,7 @@ export class RecorderImpl implements Recorder {
 		const warn = this.warn.bind(this);
 		if(this._state === "initial") {
 			warn("resume() called before start() -- use start() instead. Starting anyway.");
-			this.ensureFfmpeg();
-			this._startWallMs = performance.now();
-			this._state = "recording";
+			this.transitionToRecording();
 		} else if(this._state === "recording") {
 			warn("resume() called but already recording -- no-op");
 		} else if(this._state === "paused") {
@@ -148,7 +149,7 @@ export class RecorderImpl implements Recorder {
 			// Return a resolved snapshot of what we know now. Callers
 			// who care about the final file should already be awaiting
 			// `finalized`.
-			return { path: this.opts.path, frameCount: this._frameCount, written: this._ff !== null };
+			return { path: this.config.opts.path, frameCount: this._frameCount, written: this._ff !== null };
 		}
 
 		const wasInitial = this._state === "initial";
@@ -173,7 +174,7 @@ export class RecorderImpl implements Recorder {
 			// autoStart=false and no start()/resume() ever called -- by
 			// design, no file is written. Nothing to finalise either.
 			this.warn("stop() called without start()/resume(); no file written");
-			const empty: StopResult = { path: this.opts.path, frameCount: 0, written: false };
+			const empty: StopResult = { path: this.config.opts.path, frameCount: 0, written: false };
 			this._finalized = Promise.resolve(empty);
 			return empty;
 		}
@@ -189,7 +190,7 @@ export class RecorderImpl implements Recorder {
 		}
 
 		const firstPassResult: StopResult = {
-			path: this.opts.path,
+			path: this.config.opts.path,
 			frameCount: this._frameCount,
 			written: true,
 		};
@@ -240,21 +241,21 @@ export class RecorderImpl implements Recorder {
 	 */
 	private async runSecondPass(firstPass: StopResult): Promise<StopResult> {
 		const args = buildSecondPassFfmpegArgs(
-			this.intermediatePath,
-			this.opts.path,
-			this.secondPassArgs,
+			this.config.intermediatePath,
+			this.config.opts.path,
+			this.config.secondPassArgs,
 			this._audioTracks
 		);
-		await runFfmpeg(this.ffmpegPath, args);
+		await runFfmpeg(this.config.ffmpegPath, args);
 		// Second pass succeeded: the intermediate is no longer needed.
 		// Best-effort delete; a stranded intermediate is annoying but not
 		// a correctness bug.
-		await fs.unlink(this.intermediatePath).catch(() => { /* ignore */ });
+		await fs.unlink(this.config.intermediatePath).catch(() => { /* ignore */ });
 		return firstPass;
 	}
 
 	private warn(msg: string): void {
-		if(!this.opts.silenceWarnings) console.warn(`[playwright-recorder-plus] ${msg}`);
+		if(!this.config.opts.silenceWarnings) console.warn(`[playwright-recorder-plus] ${msg}`);
 	}
 
 	private onFrame(data: Buffer | ArrayBuffer): void {
@@ -264,13 +265,13 @@ export class RecorderImpl implements Recorder {
 		if(!this._sizeChecked) {
 			this._sizeChecked = true;
 			const actual = parseJpegSize(buf);
-			if(actual && (actual.width !== this.size.width || actual.height !== this.size.height)) {
+			if(actual && (actual.width !== this.config.size.width || actual.height !== this.config.size.height)) {
 				// Stop screencast and report. This is almost always a
 				// "tracing started before recorder" mistake.
 				this.page.screencast.stop().catch(() => { /* ignore */ });
 				throw new Error(
 					`playwright-recorder-plus: server delivered ${actual.width}x${actual.height}, ` +
-					`expected ${this.size.width}x${this.size.height}. Cause: another screencast client ` +
+					`expected ${this.config.size.width}x${this.config.size.height}. Cause: another screencast client ` +
 					`(typically context.tracing.start with screenshots: true) started before ` +
 					`attachRecorder. Move attachRecorder before any tracing.start call.`
 				);
@@ -302,12 +303,68 @@ export class RecorderImpl implements Recorder {
 	private ensureFfmpeg(): void {
 		if(this._ff) return;
 		// First pass writes to the intermediate file, NOT opts.path.
-		this._ff = spawn(this.ffmpegPath, [...this.firstPassArgs, this.intermediatePath], {
+		this._ff = spawn(this.config.ffmpegPath, [...this.config.firstPassArgs, this.config.intermediatePath], {
 			stdio: ["pipe", "ignore", "inherit"],
 		});
 		this._ff.on("error", err => {
 			this.warn(`ffmpeg process error: ${err.message}`);
 		});
+	}
+
+	/**
+	 * Move into the "recording" state from "initial". Spawns the first-pass
+	 * encoder, anchors the wall clock at this moment, and kicks off a
+	 * baseline JPEG capture so static-page recordings can back-fill the
+	 * pre-first-CDP-frame window with the correct page content rather than
+	 * with whatever appears later (issue #1).
+	 */
+	private transitionToRecording(): void {
+		this.ensureFfmpeg();
+		this._startWallMs = performance.now();
+		this._state = "recording";
+		this.captureBaselineJpeg();
+	}
+
+	/**
+	 * Take a JPEG screenshot of the page right now and use it as the
+	 * back-fill image for slots 0..N-1 if no CDP frame has populated
+	 * `_lastJpeg` yet by the time the encoder needs to pad.
+	 *
+	 * Why this is needed: CDP delivers screencast frames only in response
+	 * to page changes. If the page has been static long enough that CDP
+	 * has thrown its idle throttle, no frame may arrive between
+	 * `recorder.start()` and the next page update -- and `ingestFrame`
+	 * would then back-fill the static window with the post-update frame.
+	 * The baseline screenshot captures what the page actually looks like
+	 * at t=0 so the back-fill matches reality.
+	 *
+	 * This runs in the background. Failures are non-fatal: we just fall
+	 * back to the original "first observed CDP frame" behaviour.
+	 */
+	private captureBaselineJpeg(): void {
+		const expectedWidth = this.config.size.width;
+		const expectedHeight = this.config.size.height;
+		this.page.screenshot({
+			type: "jpeg",
+			quality: this.config.opts.jpegQuality,
+			clip: { x: 0, y: 0, width: expectedWidth, height: expectedHeight },
+			// Force output dimensions to match CSS pixels regardless of
+			// deviceScaleFactor. WebKit otherwise returns a 2x-scaled
+			// image when DPR > 1, which would not match the screencast
+			// frame size and get rejected below.
+			scale: "css",
+		}).then(buf => {
+			// A real CDP frame may have already arrived and populated
+			// _lastJpeg while screenshot() was in flight; honour it.
+			if(this._lastJpeg !== null) return;
+			// If the screenshot dimensions don't match our screencast
+			// size, don't use it -- mixed-size frames would confuse the
+			// encoder. Falling back to the original "first observed
+			// frame" behaviour is fine, just less accurate.
+			const actual = parseJpegSize(buf);
+			if(!actual || actual.width !== expectedWidth || actual.height !== expectedHeight) return;
+			this._lastJpeg = buf;
+		}).catch(() => { /* page may be closing; fall back silently */ });
 	}
 
 	/**
@@ -318,9 +375,11 @@ export class RecorderImpl implements Recorder {
 	 * - Gaps since the last write are filled with copies of the previous
 	 *   frame.
 	 * - The very first frame may arrive several seconds after start() (CDP
-	 *   only sends frames when the page changes); we back-fill those slots
-	 *   with copies of *that* first frame, so the encoded video starts at
-	 *   wall-clock t=0 with whatever the page looks like initially.
+	 *   only sends frames when the page changes). For back-filling slots
+	 *   0..N-1 we prefer the baseline JPEG captured at start time (see
+	 *   `captureBaselineJpeg`); if it isn't ready yet we fall back to the
+	 *   current frame, which still preserves wall-clock duration even if
+	 *   it can be visually wrong when the page changed mid-stream.
 	 *
 	 * Frames received during `paused` state are dropped; pausedAccumMs
 	 * excludes paused intervals from the elapsed computation.
@@ -329,7 +388,7 @@ export class RecorderImpl implements Recorder {
 		if(this._state !== "recording" || this._startWallMs === null) return;
 
 		const elapsedMs = nowMs - this._startWallMs - this._pausedAccumMs;
-		const frameNumber = Math.floor(elapsedMs * this.fps / MS_PER_SECOND);
+		const frameNumber = Math.floor(elapsedMs * this.config.fps / MS_PER_SECOND);
 
 		// Drop frames that fall in the same slot as the previous one (CDP
 		// can deliver faster than `fps` on lively pages -- a 60Hz animation
@@ -340,13 +399,11 @@ export class RecorderImpl implements Recorder {
 			return;
 		}
 
-		// Pad the gap since the last write. Two cases:
-		// - First frame ever (`_lastFrameNumber === -1`): back-fill slots
-		//   0..frameNumber-1 with copies of the current frame. (We have no
-		//   previous frame to use, so the first observed frame is our
-		//   best representation of what the page looked like.)
-		// - Subsequent frames: pad with the previous frame, since the gap
-		//   represents a period where nothing changed.
+		// Pad the gap since the last write. `_lastJpeg` is the baseline
+		// screenshot when set by `captureBaselineJpeg`, the previous CDP
+		// frame on subsequent calls, or null if neither has happened (in
+		// which case we use the current frame -- not ideal but it
+		// preserves duration).
 		const padJpeg = this._lastJpeg ?? buf;
 		const padFrom = this._lastFrameNumber + 1;
 		for(let i = padFrom; i < frameNumber; i++) this.writeFrame(padJpeg);
@@ -367,7 +424,7 @@ export class RecorderImpl implements Recorder {
 	private padToNow(): void {
 		if(this._startWallMs === null || !this._lastJpeg) return;
 		const elapsedMs = performance.now() - this._startWallMs - this._pausedAccumMs;
-		const targetFrame = Math.floor(elapsedMs * this.fps / MS_PER_SECOND);
+		const targetFrame = Math.floor(elapsedMs * this.config.fps / MS_PER_SECOND);
 		const repeatCount = targetFrame - this._lastFrameNumber;
 		for(let i = 0; i < repeatCount; i++) this.writeFrame(this._lastJpeg);
 		this._lastFrameNumber = targetFrame;
@@ -386,81 +443,3 @@ export class RecorderImpl implements Recorder {
 	}
 }
 
-const SECONDS_TO_MS = 1000;
-
-/**
- * Build the second-pass argv. Layout is:
- *
- *   ffmpeg -loglevel error -y -i <intermediate>
- *          [-i <audio_i>]*
- *          [-filter_complex "<adelay/amix graph>"]
- *          -map 0:v
- *          [-map [aout]]
- *          <secondPassCodecArgs>          // user / preset codec choice
- *          [-c:a <audio codec for output>]
- *          <outPath>
- *
- * When there are no audio tracks the audio mapping and codec are omitted
- * entirely; the second pass is then just a video transcode.
- *
- * `secondPassCodecArgs` covers the video stream: `-c:v ... -preset ...`
- * etc. It must NOT include `-i` or the output path -- we add those.
- */
-function buildSecondPassFfmpegArgs(
-	intermediatePath: string,
-	outPath: string,
-	secondPassCodecArgs: string[],
-	tracks: AudioTrack[]
-): string[] {
-	const args = ["-loglevel", "error", "-y", "-i", intermediatePath];
-	for(const track of tracks) {
-		args.push("-i", track.path);
-	}
-
-	if(tracks.length > 0) {
-		// Build the filter graph. Track i corresponds to ffmpeg input
-		// (i + 1) because input 0 is the video.
-		//   [1:a]adelay=<ms>|<ms>[a0]; [2:a]adelay=...[a1]; ...
-		//   [a0][a1]...amix=inputs=N[aout]
-		const filterParts: string[] = [];
-		const labels: string[] = [];
-		for(let i = 0; i < tracks.length; i++) {
-			const offsetMs = Math.max(0, Math.round(tracks[i].offset * SECONDS_TO_MS));
-			const label = `a${i}`;
-			// `adelay=<ms>|<ms>` applies the delay to all channels (stereo here).
-			filterParts.push(`[${i + 1}:a]adelay=${offsetMs}|${offsetMs}[${label}]`);
-			labels.push(`[${label}]`);
-		}
-		const mixLabel = "aout";
-		filterParts.push(
-			`${labels.join("")}amix=inputs=${tracks.length}:duration=longest:dropout_transition=0[${mixLabel}]`
-		);
-		args.push("-filter_complex", filterParts.join(";"), "-map", "0:v", "-map", `[${mixLabel}]`);
-	} else {
-		args.push("-map", "0:v");
-	}
-
-	args.push(...secondPassCodecArgs);
-
-	if(tracks.length > 0) {
-		args.push("-c:a", pickAudioCodec(outPath));
-	}
-
-	// No `-shortest`: scheduled audio can extend past the video end
-	// (delays + clip lengths). Trimming the muxed file to the shorter
-	// stream caused a 7-second silent regression; do not re-add.
-	args.push(outPath);
-	return args;
-}
-
-/** Spawn ffmpeg, await its exit, reject on non-zero. */
-function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
-	return new Promise<void>((resolve, reject) => {
-		const proc = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "inherit"] });
-		proc.on("error", reject);
-		proc.on("close", code => {
-			if(code === 0) resolve();
-			else reject(new Error(`ffmpeg exited with code ${code}`));
-		});
-	});
-}
