@@ -49,6 +49,15 @@ export class RecorderImpl implements Recorder {
 	private _lastFrameNumber = -1;
 	private _pausedAccumMs = 0;
 	private _pauseStartedAtMs: number | null = null;
+	// Set false at every transition into RECORDING (start / autoStart /
+	// resume). Set true the first time `ingestFrame` accepts a real CDP
+	// frame, OR when the baseline screenshot writes itself in. The
+	// background `captureBaselineJpeg` only overwrites `_lastJpeg` while
+	// this is false. Without this flag, the baseline taken at resume()
+	// would either get rejected (if we keep the issue #1 "skip when
+	// _lastJpeg is set" rule) or stomp on a fresher CDP frame (if we
+	// drop that rule).
+	private _baselineConsumed = false;
 
 	// Final-result promise: resolves when both first pass (capture) and
 	// second pass (transcode + audio mux) have completed. Stored so a
@@ -98,7 +107,7 @@ export class RecorderImpl implements Recorder {
 		} else if(this._state === "paused") {
 			warn("start() called while paused -- use resume() instead. Resuming anyway.");
 			this.notePauseExit();
-			this._state = "recording";
+			this.transitionToRecording();
 		} else {
 			warn("start() called after stop() -- no-op");
 		}
@@ -129,7 +138,7 @@ export class RecorderImpl implements Recorder {
 			warn("resume() called but already recording -- no-op");
 		} else if(this._state === "paused") {
 			this.notePauseExit();
-			this._state = "recording";
+			this.transitionToRecording();
 		} else {
 			warn("resume() called after stop() -- no-op");
 		}
@@ -320,26 +329,38 @@ export class RecorderImpl implements Recorder {
 	 */
 	private transitionToRecording(): void {
 		this.ensureFfmpeg();
-		this._startWallMs = performance.now();
+		if(this._startWallMs === null) this._startWallMs = performance.now();
 		this._state = "recording";
+		// Re-arm the baseline so it can refresh `_lastJpeg` for this leg
+		// of the recording. resume() relies on this: at resume time the
+		// page may look completely different than when we paused, but
+		// `_lastJpeg` still holds the pre-pause frame -- the baseline
+		// screenshot replaces it with what the page actually looks like
+		// now.
+		this._baselineConsumed = false;
 		this.captureBaselineJpeg();
 	}
 
 	/**
 	 * Take a JPEG screenshot of the page right now and use it as the
-	 * back-fill image for slots 0..N-1 if no CDP frame has populated
-	 * `_lastJpeg` yet by the time the encoder needs to pad.
+	 * back-fill image for slots that need padding before the next CDP
+	 * frame arrives. Used by both:
 	 *
-	 * Why this is needed: CDP delivers screencast frames only in response
-	 * to page changes. If the page has been static long enough that CDP
-	 * has thrown its idle throttle, no frame may arrive between
-	 * `recorder.start()` and the next page update -- and `ingestFrame`
-	 * would then back-fill the static window with the post-update frame.
-	 * The baseline screenshot captures what the page actually looks like
-	 * at t=0 so the back-fill matches reality.
+	 *   - `start()` / `autoStart`: there is no `_lastJpeg` yet, and on a
+	 *     static page CDP may not deliver a frame until something
+	 *     changes -- without this baseline, back-fill would use the
+	 *     first post-change frame (issue #1).
+	 *   - `resume()`: `_lastJpeg` still holds the pre-pause frame, but
+	 *     the page may look very different now. Without this baseline,
+	 *     back-fill of the post-resume static window would show the
+	 *     stale pre-pause content (issue #2).
 	 *
-	 * This runs in the background. Failures are non-fatal: we just fall
-	 * back to the original "first observed CDP frame" behaviour.
+	 * Runs in the background. The result is dropped if a real CDP frame
+	 * has been ingested in the meantime (`_baselineConsumed`), so we
+	 * never overwrite a fresher frame with this older screenshot.
+	 *
+	 * Failures are non-fatal: we just fall back to the previous
+	 * `_lastJpeg` (null on start, pre-pause frame on resume).
 	 */
 	private captureBaselineJpeg(): void {
 		const expectedWidth = this.config.size.width;
@@ -354,16 +375,17 @@ export class RecorderImpl implements Recorder {
 			// frame size and get rejected below.
 			scale: "css",
 		}).then(buf => {
-			// A real CDP frame may have already arrived and populated
-			// _lastJpeg while screenshot() was in flight; honour it.
-			if(this._lastJpeg !== null) return;
+			// A real CDP frame has already arrived for this transition;
+			// using the older screenshot would regress accuracy.
+			if(this._baselineConsumed) return;
 			// If the screenshot dimensions don't match our screencast
 			// size, don't use it -- mixed-size frames would confuse the
-			// encoder. Falling back to the original "first observed
-			// frame" behaviour is fine, just less accurate.
+			// encoder. Falling back to the previous _lastJpeg is fine,
+			// just less accurate.
 			const actual = parseJpegSize(buf);
 			if(!actual || actual.width !== expectedWidth || actual.height !== expectedHeight) return;
 			this._lastJpeg = buf;
+			this._baselineConsumed = true;
 		}).catch(() => { /* page may be closing; fall back silently */ });
 	}
 
@@ -386,6 +408,12 @@ export class RecorderImpl implements Recorder {
 	 */
 	private ingestFrame(buf: Buffer, nowMs: number): void {
 		if(this._state !== "recording" || this._startWallMs === null) return;
+
+		// Mark the baseline as consumed even when we drop this frame as
+		// a same-slot duplicate -- we still saw a fresher CDP frame for
+		// this leg, so the in-flight `captureBaselineJpeg` should not
+		// later overwrite `_lastJpeg` with its older snapshot.
+		this._baselineConsumed = true;
 
 		const elapsedMs = nowMs - this._startWallMs - this._pausedAccumMs;
 		const frameNumber = Math.floor(elapsedMs * this.config.fps / MS_PER_SECOND);

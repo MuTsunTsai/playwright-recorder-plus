@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3]
+
+### Fixed
+
+- Fixed [#2](https://github.com/MuTsunTsai/playwright-recorder-plus/issues/2): when the page changed during a `pause()` window, the post-`resume()` part of the recording would back-fill with the *pre-pause* frame until CDP delivered another frame -- so a "click → pause through loading → resume on the new screen" sequence would show the old screen for several seconds after resume. `resume()` now refreshes the back-fill baseline the same way `start()` does, so the post-resume static window reflects the actual page state at resume time.
+
 ## [0.1.2] - 2026-05-04
 
 ### Fixed
